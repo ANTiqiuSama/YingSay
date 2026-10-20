@@ -504,6 +504,13 @@ class UI:
         self.root.withdraw()
         self.root.title(APP_NAME)
         try:
+            from PIL import ImageTk
+
+            self._icon_photo = ImageTk.PhotoImage(make_icon_image().resize((64, 64)))
+            self.root.iconphoto(True, self._icon_photo)
+        except Exception:
+            pass
+        try:
             ttk.Style().theme_use("vista")
         except tk.TclError:
             pass
@@ -530,18 +537,104 @@ class UI:
         self.root.mainloop()
 
 
-# ------------------------------------------------------------------ 托盘
-def make_icon_image(color=(255, 77, 94)):
-    from PIL import Image, ImageDraw
+# ------------------------------------------------------------------ 托盘与应声图标（04 声落成澜）
+_ICON_CACHE = None
 
-    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.ellipse((2, 2, 62, 62), fill=(31, 31, 36, 255))
-    d.rounded_rectangle((24, 12, 40, 38), radius=8, fill=color + (255,))
-    d.arc((17, 22, 47, 46), start=0, end=180, fill=(245, 245, 247, 255), width=3)
-    d.line((32, 46, 32, 53), fill=(245, 245, 247, 255), width=3)
-    d.line((24, 53, 40, 53), fill=(245, 245, 247, 255), width=3)
-    return img
+
+def make_icon_image(color=None):
+    """生成「04 · 声落成澜」现代低饱和极简图标（256x256 RGBA）。"""
+    global _ICON_CACHE
+    if _ICON_CACHE is not None:
+        return _ICON_CACHE.copy()
+
+    import numpy as np
+    from PIL import Image, ImageFilter
+
+    size = 512
+    y, x = np.mgrid[:size, :size].astype(np.float32)
+    margin, radius = 32.0, 114.0
+    cx, cy = (size - 1) / 2.0, (size - 1) / 2.0
+    half = (size / 2.0) - margin
+    dx = np.maximum(np.abs(x - cx) - (half - radius), 0.0)
+    dy = np.maximum(np.abs(y - cy) - (half - radius), 0.0)
+    dist = (dx**2.15 + dy**2.15) ** (1.0 / 2.15) - radius
+
+    ny = np.clip((y - margin) / (size - 2 * margin), 0.0, 1.0)
+    nx = np.clip((x - margin) / (size - 2 * margin), 0.0, 1.0)
+    radial = np.exp(-((nx - 0.5) ** 2 + (ny - 0.15) ** 2) / (2 * 0.55**2)) * 0.16
+    t = np.clip(ny - radial, 0.0, 1.0)
+
+    c_top, c_bot = (32, 43, 41), (18, 25, 24)
+    r = c_top[0] * (1.0 - t) + c_bot[0] * t
+    g = c_top[1] * (1.0 - t) + c_bot[1] * t
+    b = c_top[2] * (1.0 - t) + c_bot[2] * t
+    alpha = np.clip(0.5 - dist / 1.2, 0.0, 1.0)
+
+    rgba = np.stack([
+        np.clip(r, 0, 255).astype(np.uint8),
+        np.clip(g, 0, 255).astype(np.uint8),
+        np.clip(b, 0, 255).astype(np.uint8),
+        (alpha * 255).astype(np.uint8),
+    ], axis=-1)
+    base = Image.fromarray(rgba, "RGBA")
+
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    shadow = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    sh_mask = Image.fromarray((alpha * 255 * 0.34).astype(np.uint8), "L")
+    shadow.paste((10, 11, 14, 255), (0, 8), sh_mask)
+    shadow = shadow.filter(ImageFilter.GaussianBlur(10))
+    canvas = Image.alpha_composite(canvas, shadow)
+    canvas = Image.alpha_composite(canvas, base)
+
+    rim_dist = np.abs(dist + 1.5) - 0.9
+    rim_a = np.clip(0.5 - rim_dist / 1.0, 0.0, 1.0) * alpha
+    rim_fade = 44.0 * (1.0 - ny) + 12.0 * ny
+    rim_rgba = np.zeros((size, size, 4), dtype=np.uint8)
+    rim_rgba[..., :3] = 255
+    rim_rgba[..., 3] = np.clip(rim_a * rim_fade, 0, 255).astype(np.uint8)
+    canvas = Image.alpha_composite(canvas, Image.fromarray(rim_rgba, "RGBA"))
+
+    cx_r, cy_ring = 256.0, 321.0
+    for rx, ry, half_t, alpha_val in ((147.5, 54.0, 9.0, 105), (95.0, 34.0, 10.0, 185)):
+        ex = (x - cx_r) / rx
+        ey = (y - cy_ring) / ry
+        r_norm = np.sqrt(ex * ex + ey * ey)
+        scale = 1.0 / np.sqrt((ex / rx) ** 2 + (ey / ry) ** 2 + 1e-8)
+        dist_px = np.abs(r_norm - 1.0) * scale - half_t
+        ang_fade = 1.0 - 0.65 * np.exp(-((x - cx_r) / 72.5) ** 2) * np.clip((cy_ring - y) / ry, 0.0, 1.0)
+        a = np.clip(0.5 - dist_px / 1.1, 0.0, 1.0) * ang_fade
+        ring_rgba = np.zeros((size, size, 4), dtype=np.uint8)
+        ring_rgba[..., 0], ring_rgba[..., 1], ring_rgba[..., 2] = 205, 224, 218
+        ring_rgba[..., 3] = (a * alpha_val).astype(np.uint8)
+        canvas = Image.alpha_composite(canvas, Image.fromarray(ring_rgba, "RGBA"))
+
+    d_center = np.sqrt(((x - cx_r) / 28.0) ** 2 + ((y - cy_ring) / 11.0) ** 2) - 1.0
+    a_center = np.clip(0.5 - d_center * 14.0, 0.0, 1.0)
+    c_rgba = np.zeros((size, size, 4), dtype=np.uint8)
+    c_rgba[..., 0], c_rgba[..., 1], c_rgba[..., 2] = 242, 245, 242
+    c_rgba[..., 3] = (a_center * 245).astype(np.uint8)
+    canvas = Image.alpha_composite(canvas, Image.fromarray(c_rgba, "RGBA"))
+
+    def add_cap(x1, y1, x2, y2, rad, col):
+        px, py = x - x1, y - y1
+        bx, by = x2 - x1, y2 - y1
+        h = np.clip((px * bx + py * by) / max(bx * bx + by * by, 1e-6), 0.0, 1.0)
+        d = np.sqrt((px - bx * h) ** 2 + (py - by * h) ** 2) - rad
+        ca = np.clip(0.5 - d / 1.1, 0.0, 1.0)
+        out = np.zeros((size, size, 4), dtype=np.uint8)
+        out[..., 0], out[..., 1], out[..., 2] = col[0], col[1], col[2]
+        out[..., 3] = (ca * col[3]).astype(np.uint8)
+        return Image.fromarray(out, "RGBA")
+
+    for x0, y0, y1, rad, col in (
+        (197.5, 157.5, 222.5, 14.0, (185, 210, 202, 195)),
+        (314.5, 157.5, 222.5, 14.0, (185, 210, 202, 195)),
+        (256.0, 117.5, 257.5, 18.0, (244, 245, 242, 255)),
+    ):
+        canvas = Image.alpha_composite(canvas, add_cap(x0, y0, x0, y1, rad, col))
+
+    _ICON_CACHE = canvas.resize((256, 256), Image.Resampling.LANCZOS)
+    return _ICON_CACHE.copy()
 
 
 class Tray:

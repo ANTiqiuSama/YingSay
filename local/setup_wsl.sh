@@ -104,7 +104,7 @@ if [ "$ASR_MODEL" != "none" ] && ! up "$ASR_PORT" /v1/models; then
 fi
 if [ "$ENABLE_LLM" = "1" ] && ! up "$LLM_PORT" /v1/models; then
   vllm serve "$LLM_MODEL" --served-model-name local-llm --host "$HOST" --port "$LLM_PORT" \
-    --gpu-memory-utilization "$LLM_GPU" --max-model-len 8192 --max-num-seqs 16 > "$D/llm.log" 2>&1 &
+    --kv-cache-memory-bytes "${LLM_KV_BYTES:-2G}" --max-model-len 4096 --max-num-seqs 8 > "$D/llm.log" 2>&1 &
   pids+=($!); echo $! > "$D/llm.pid"
 fi
 echo "YingSay local services started: ${pids[*]}"
