@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yingsay"
+dynamic = ["version"]
+description = "应声 YingSay：自由开源的 Windows 实时语音助手（按住说话、AI 整理、翻译、语音改写与问答），基于小米 MiMo"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26",
+  "sounddevice>=0.4.6",
+  "requests>=2.31",
+  "lameenc>=1.7",
+  "pynput>=1.7.6",
+  "pystray>=0.19.5",
+  "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyinstaller>=6.5"]
+
+[project.scripts]
+yingsay-cli = "yingsay.app:main"
+
+[project.gui-scripts]
+yingsay = "yingsay.app:main"
+
+[tool.setuptools]
+packages = ["yingsay"]
+
+[tool.setuptools.dynamic]
+version = { attr = "yingsay.__version__" }

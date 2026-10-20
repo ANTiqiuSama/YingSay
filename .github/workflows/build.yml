@@ -1,0 +1,63 @@
+name: build-windows
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest pyinstaller
+
+      - name: Unit tests
+        run: python -m pytest -q tests
+
+      - name: Windows smoke test (UI / tray / hotkey hook / clipboard / DPAPI)
+        run: python scripts/smoke_windows.py
+
+      - name: Build exe
+        shell: pwsh
+        run: |
+          python scripts/make_icon.py
+          pyinstaller --noconfirm --clean --onefile --windowed --name YingSay `
+            --icon assets/icon.ico `
+            --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 `
+            --hidden-import pystray._win32 --hidden-import lameenc --collect-data sounddevice `
+            launcher.py
+          $v = python -c "import yingsay; print(yingsay.__version__)"
+          "VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Compress-Archive -Path dist/YingSay.exe, README.md, LICENSE -DestinationPath dist/YingSay-windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YingSay-windows-x64
+          path: dist/YingSay.exe
+
+      - name: Publish release
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: YingSay v${{ env.VERSION }}
+          make_latest: true
+          files: |
+            dist/YingSay.exe
+            dist/YingSay-windows-x64.zip
+          body: |
+            应声 YingSay —— Windows x64 单文件版。下载 `YingSay.exe` 双击运行，在弹出的设置里填入小米 MiMo Token Plan 的 API Key，点「自动选最快节点」后保存。
+            默认：按住 **右 Ctrl** 说话，松开即输入；F8 指令/提问；F9 边说边翻译；Esc 取消。
