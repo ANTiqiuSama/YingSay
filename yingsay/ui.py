@@ -210,7 +210,7 @@ class SettingsWindow:
         cfg = app.cfg
         self.w = w = tk.Toplevel(app.root)
         w.title(f"{DISPLAY_NAME} {__version__} 设置")
-        w.geometry("700x820")
+        w.geometry("720x840")
         nb = ttk.Notebook(w)
         nb.pack(fill="both", expand=True, padx=8, pady=8)
         self.vars: dict[str, tk.Variable] = {}
@@ -306,6 +306,32 @@ class SettingsWindow:
         self.app_text.insert("1.0", "\n".join(f"{k}={v}" for k, v in (cfg.data.get("app_styles") or {}).items()))
         self.app_text.grid(row=7, column=0, columnspan=2, sticky="ew")
 
+        # --- 本地模型
+        f = tab("本地模型")
+        from .local import LOCAL_ASR_MODELS, LOCAL_LLM_MODELS
+
+        row(f, 0, "识别用", "asr_backend", "combo", ["auto", "local", "mimo"],
+            hint="auto=本地服务在线就用本地（零网络延迟），否则用 MiMo 云端")
+        row(f, 2, "本地识别模型", "local_asr_model", "combo", list(LOCAL_ASR_MODELS),
+            hint="qwen3-asr-1.7b 最准 / 0.6b 更快更省显存 / sensevoice 极快、不占显存")
+        row(f, 4, "润色用", "llm_backend", "combo", ["auto", "local", "mimo"],
+            hint="auto=听写/翻译用本地润色，F8 指令和提问仍用云端大模型")
+        row(f, 6, "本地润色模型", "local_llm_model", "combo", LOCAL_LLM_MODELS)
+        row(f, 7, "随应声自动启动", "local_autostart", "check")
+        row(f, 8, "退出时释放显存", "local_stop_on_exit", "check", hint="不勾选则模型常驻显存，下次秒开")
+        row(f, 10, "WSL 发行版", "local_wsl_distro", hint="留空=默认发行版（wsl -l -v 查看）")
+        lb = ttk.Frame(f)
+        lb.grid(row=12, column=0, columnspan=2, sticky="w", pady=10)
+        ttk.Button(lb, text="一键安装（WSL2）", command=lambda: self._local("open_installer")).pack(side="left")
+        ttk.Button(lb, text="启动", command=lambda: self._local("start")).pack(side="left", padx=6)
+        ttk.Button(lb, text="停止", command=lambda: self._local("stop")).pack(side="left")
+        ttk.Button(lb, text="测速对比", command=self.bench).pack(side="left", padx=6)
+        self.local_status = ttk.Label(f, text="", wraplength=600, justify="left")
+        self.local_status.grid(row=13, column=0, columnspan=2, sticky="w")
+        ttk.Label(f, text="需要：Windows 10/11 + WSL2 + NVIDIA 显卡（推荐 16GB+ 显存）。默认 Qwen3-ASR-1.7B + Qwen3-4B 约占 20GB 显存。",
+                  foreground="#888", wraplength=600).grid(row=14, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self._refresh_local()
+
         # --- 高级
         f = tab("高级")
         row(f, 0, "ASR 模型", "asr_model", "combo", ["mimo-v2.5-asr"])
@@ -368,6 +394,48 @@ class SettingsWindow:
                     styles[a.strip().lower()] = b.strip()
         out["app_styles"] = styles
         return out
+
+    def _local(self, action: str):
+        self.local_status.config(text="处理中…")
+
+        def run():
+            try:
+                msg = getattr(self.app.local, action)()
+            except Exception as e:  # noqa: BLE001
+                msg = f"出错：{e}"
+            self.app.ui.call(lambda: self.local_status.config(text=msg))
+            self.app.tray.refresh()
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def bench(self):
+        self.local_status.config(text="测速中…")
+
+        def run():
+            from .app import benchmark
+
+            try:
+                msg = benchmark(self.app)
+            except Exception as e:  # noqa: BLE001
+                msg = f"测速失败：{e}"
+            self.app.ui.call(lambda: self.local_status.config(text=msg))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _refresh_local(self):
+        try:
+            if not self.w.winfo_exists():
+                return
+
+            def run():
+                d = self.app.local.describe()
+                self.app.ui.call(lambda: self.w.winfo_exists() and self.w.title(
+                    f"{DISPLAY_NAME} {__version__} 设置 — {d}"))
+
+            threading.Thread(target=run, daemon=True).start()
+            self.w.after(3000, self._refresh_local)
+        except Exception:
+            pass
 
     def _refresh_usage(self):
         try:
@@ -503,6 +571,9 @@ class Tray:
             pystray.MenuItem(f"{DISPLAY_NAME} {__version__}", None, enabled=False),
             pystray.MenuItem(lambda item: f"听写：按住 {cfg.get('hotkey_dictate')}", None, enabled=False),
             pystray.MenuItem(lambda item: f"今日用量：{app.usage.short()}", lambda: app.ui.call(app.open_settings)),
+            pystray.MenuItem(lambda item: app.local.describe(), None, enabled=False),
+            pystray.MenuItem("启动本地模型", lambda: app.start_local()),
+            pystray.MenuItem("停止本地模型（释放显存）", lambda: app.stop_local()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("设置…", lambda: app.ui.call(app.open_settings), default=True),
             pystray.MenuItem("历史记录…", lambda: app.ui.call(app.open_history)),

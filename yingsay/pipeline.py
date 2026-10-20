@@ -37,14 +37,49 @@ class Result:
 class Processor:
     _wav_only = False  # MP3 被接口拒绝过一次后，本次运行内都用 WAV
 
-    def __init__(self, cfg, client, executor: ThreadPoolExecutor | None = None):
+    def __init__(self, cfg, client, executor: ThreadPoolExecutor | None = None, local=None):
         self.cfg = cfg
         self.client = client
         self.ex = executor
+        self.local = local  # LocalBackend（WSL2 本地模型），可为 None
+        self.asr_src = "云端"
+        self.llm_src = "云端"
+
+    def _has_cloud(self) -> bool:
+        return bool(getattr(self.client, "api_key", True))
+
+    def _local_asr(self):
+        if self.local is None or (self.cfg.get("asr_backend") or "auto") == "mimo":
+            return None
+        return self.local.asr_choice()
+
+    def _local_llm(self, for_command: bool = False) -> bool:
+        if self.local is None:
+            return False
+        backend = self.cfg.get("llm_backend") or "auto"
+        if backend == "mimo":
+            return False
+        if for_command and self._has_cloud() and backend == "auto":
+            return False  # 指令/提问更需要大模型的知识，默认仍走云端
+        return self.local.llm_ready()
 
     # -------------------------------------------------------- ASR
     def transcribe_segment(self, pcm: np.ndarray) -> str:
-        """识别一段（≤150 秒）音频；MP3 失败时自动用 WAV 重试。"""
+        """识别一段（≤150 秒）音频；优先本地模型，MP3 失败时自动用 WAV 重试。"""
+        which = self._local_asr()
+        if which:
+            try:
+                text = self.local.transcribe(pcm, which, self.cfg.get("asr_language") or "auto",
+                                             self.cfg.get("dictionary") if which == "qwen" else None)
+                self.asr_src = "本地" + ("Qwen" if which == "qwen" else "SenseVoice")
+                return text.strip()
+            except Exception as e:  # noqa: BLE001
+                if not self._has_cloud():
+                    raise MiMoError(f"本地识别失败：{e}")
+                log.warning("本地识别失败，改用云端: %s", e)
+        elif (self.cfg.get("asr_backend") or "auto") == "local" and not self._has_cloud():
+            raise MiMoError("本地识别服务未启动：托盘 → 启动本地模型")
+        self.asr_src = "云端"
         model = self.cfg.get("asr_model")
         lang = self.cfg.get("asr_language")
         fmt = "wav" if Processor._wav_only else (self.cfg.get("upload_format") or "mp3")
@@ -74,6 +109,16 @@ class Processor:
         return smart_join(list(ex.map(self.transcribe_segment, chunks)))
 
     def _llm(self, model_key: str, messages: list, raw_len: int, hedge: bool = False) -> str:
+        if self._local_llm(for_command=(model_key == "command_model")):
+            try:
+                out = self.local.chat(messages, max_tokens=max(512, raw_len * 3))
+                self.llm_src = "本地"
+                return out
+            except Exception as e:  # noqa: BLE001
+                if not self._has_cloud():
+                    raise
+                log.warning("本地润色失败，改用云端: %s", e)
+        self.llm_src = "云端"
         return self.client.chat(
             self.cfg.get(model_key), messages,
             thinking=bool(self.cfg.get("llm_thinking")),
@@ -106,6 +151,7 @@ class Processor:
         if raw is None:
             raw = self.transcribe(pcm)
         res.timings["asr"] = time.monotonic() - t0
+        res.timings["asr_src"] = self.asr_src
         res.raw = raw
         if prompts.is_effectively_empty(raw):
             res.action = "none"
@@ -131,6 +177,7 @@ class Processor:
             res.note = f"润色失败，已输入原始识别：{e}"
             return res
         res.timings["llm"] = time.monotonic() - t1
+        res.timings["llm_src"] = self.llm_src
 
         # 安全阀：防止模型“回答”了口述内容而不是整理它
         if mode == "dictate":
@@ -156,6 +203,7 @@ class Processor:
             res.text = out.strip()
             res.action = "show"
         res.timings["llm"] = time.monotonic() - t1
+        res.timings["llm_src"] = self.llm_src
         if not res.text:
             res.action = "none"
         return res

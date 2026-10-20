@@ -23,6 +23,27 @@
 
 另外：润色失败自动退回原始识别（不丢字）、防止 AI “回答”你的话的安全阀、粘贴后恢复剪贴板（包括图片）、临时文本不进 Win+V 历史、开机自启、单实例。
 
+## 本地模型（v0.3，推荐有 NVIDIA 显卡的用户）
+
+在 WSL2 里运行开源模型，识别和润色都在本机显卡上完成，**没有网络往返**，也不消耗 Token Plan 额度：
+
+| 组件 | 模型 | 运行方式 | 显存 | 说明 |
+| --- | --- | --- | --- | --- |
+| 识别（主力） | **Qwen3-ASR-1.7B** | vLLM | 约 7GB | 开源 SOTA：WenetSpeech 4.97/5.88、AISHELL-2 2.71（WER%），支持 30 种语言 + 22 种方言（含马来语、粤语） |
+| 识别（可选） | Qwen3-ASR-0.6B | vLLM | 约 5GB | 更快、更省显存 |
+| 识别（秒开备用） | SenseVoice-Small | sherpa-onnx（CPU） | 0 | Qwen 加载期间自动顶上；中/粤/英/日/韩 |
+| 润色 | **Qwen3-4B-Instruct-2507**（可选 Qwen3-8B-FP8） | vLLM | 约 13GB | 听写/翻译润色；F8 指令与提问默认仍用 MiMo 云端 |
+
+**安装**（已装好 WSL2 和 NVIDIA 驱动）：设置 → 本地模型 → 「一键安装（WSL2）」，或在 PowerShell 运行：
+
+```powershell
+wsl -e bash -lc "curl -fsSL https://raw.githubusercontent.com/ANTiqiuSama/YingSay/main/local/setup_wsl.sh | bash"
+```
+
+装好后应声启动时会自动在后台拉起本地模型（首次加载 Qwen 约 1-2 分钟，期间用 SenseVoice）。识别/润色的「用」选项为 `auto` 时：本地在线就用本地，否则自动回落到 MiMo 云端。完成提示会显示「✓ 0.4s（本地识别0.1 本地润色0.3）」。设置里的「测速对比」会用上一段录音实测本地与云端的耗时。
+
+手动调试：`wsl -e bash -lc ~/.yingsay-local/run.sh`（前台运行）、`~/.yingsay-local/status.sh`、`~/.yingsay-local/stop.sh`；日志在 WSL 的 `~/.yingsay-local/*.log`，显存占比在 `~/.yingsay-local/env` 里调。
+
 ## 速度优化
 
 | 优化 | 效果 |
@@ -114,7 +135,9 @@ python -m yingsay                  # 启动
 
 - [ ] 实时字幕浮窗：说话时就逐字显示识别结果
 - [ ] 持续监听模式：会议或系统声音的实时转写与要点摘要
-- [ ] 多 API 接入：ASR 和 LLM 都可插拔（MiMo、OpenAI 兼容接口、DeepSeek、通义、本地 Whisper / SenseVoice 等），支持多模型同时回答再汇总
+- [x] 本地模型：Qwen3-ASR / SenseVoice / Qwen3 本地润色（v0.3）
+- [ ] 实时出字：Qwen3-ASR 流式推理（vLLM streaming）驱动实时字幕
+- [ ] 多 API 接入：ASR 和 LLM 都可插拔（MiMo、OpenAI 兼容接口、DeepSeek、通义等），支持多模型同时回答再汇总
 - [ ] 多种答案输出：浮窗显示、语音朗读（MiMo TTS）、执行动作（搜索、记笔记、发消息）
 
 ## 参考的开源项目

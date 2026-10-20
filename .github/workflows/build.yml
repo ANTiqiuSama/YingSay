@@ -65,3 +65,4 @@ jobs:
           body: |
             应声 YingSay —— Windows x64 单文件版。下载 `YingSay.exe` 双击运行，在弹出的设置里填入小米 MiMo Token Plan 的 API Key，点「自动选最快节点」后保存。
             默认：按住 **右 Ctrl** 说话，松开即输入；F8 指令/提问；F9 边说边翻译；Esc 取消。
+            **v0.3 本地模型**：有 NVIDIA 显卡 + WSL2 时，设置 → 本地模型 →「一键安装（WSL2）」，识别（Qwen3-ASR-1.7B / SenseVoice）与润色（Qwen3-4B）全部在本机完成。

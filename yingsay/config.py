@@ -46,7 +46,16 @@ DEFAULTS: dict = {
     "warmup": True,  # 按下热键时预热 HTTPS 连接
     "hedge_requests": True,  # 对冲请求：慢请求超时前再发一份，谁先回来用谁（少量额外用量换稳定速度）
     "hedge_scale": 1.0,  # 对冲等待时间倍数，网络稳定可调大
-    "plan": "Max",  # Token Plan 套餐（用于显示月额度占比）：Lite / Standard / Pro / Max
+    "plan": "Max",
+    # ---- 本地模型（WSL2 + NVIDIA 显卡）----
+    "asr_backend": "auto",  # auto=本地服务在就用本地，否则云端 / local / mimo
+    "llm_backend": "auto",  # 润色：auto / local / mimo（指令/提问在 auto 下仍走云端）
+    "local_asr_model": "qwen3-asr-1.7b",  # qwen3-asr-1.7b / qwen3-asr-0.6b / sensevoice
+    "local_llm_model": "Qwen/Qwen3-4B-Instruct-2507",  # 或 Qwen/Qwen3-8B-FP8 / 关闭
+    "local_autostart": True,  # 启动应声时自动在 WSL 里拉起本地模型
+    "local_stop_on_exit": False,  # 退出应声时停止本地模型（释放显存；下次需重新加载）
+    "local_wsl_distro": "",  # 留空=默认发行版
+    "local_host": "127.0.0.1",  # Token Plan 套餐（用于显示月额度占比）：Lite / Standard / Pro / Max
     # ---- 热键 ----
     "hotkey_dictate": "ctrl_r",
     "hotkey_command": "f8",

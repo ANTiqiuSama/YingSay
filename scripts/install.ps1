@@ -2,11 +2,14 @@
   YingSay 一键安装（Windows 10/11）
   用法（PowerShell）：
     irm https://raw.githubusercontent.com/ANTiqiuSama/YingSay/main/scripts/install.ps1 | iex
+  同时安装本地模型（WSL2 + NVIDIA 显卡）：
+    & ([scriptblock]::Create((irm https://raw.githubusercontent.com/ANTiqiuSama/YingSay/main/scripts/install.ps1))) -Local
   从源码安装（需要/会自动安装 Python 3.12）：
     & ([scriptblock]::Create((irm https://raw.githubusercontent.com/ANTiqiuSama/YingSay/main/scripts/install.ps1))) -FromSource
 #>
 param(
   [switch]$FromSource,
+  [switch]$Local,
   [string]$Dir = "$env:LOCALAPPDATA\Programs\YingSay",
   [string]$Repo = "ANTiqiuSama/YingSay",
   [string]$ApiKey = "",
@@ -72,6 +75,15 @@ New-Shortcut (Join-Path $desktop "YingSay.lnk") $target $targetArgs $Dir $icon
 if ($ApiKey) {
   $extra = if ($BaseUrl) { "--set-base-url `"$BaseUrl`"" } else { "" }
   & cmd /c "$cli --set-key `"$ApiKey`" $extra"
+}
+
+if ($Local) {
+  if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+    Write-Warning "没有找到 WSL：请先运行 wsl --install 并重启，再重新执行本脚本"
+  } else {
+    Write-Host "正在 WSL2 中安装本地语音模型（约 10-20 分钟，主要是下载模型）..."
+    wsl.exe -e bash -lc "curl -fsSL https://raw.githubusercontent.com/$Repo/main/local/setup_wsl.sh -o /tmp/yingsay_setup.sh && bash /tmp/yingsay_setup.sh"
+  }
 }
 
 Write-Host "安装完成：$Dir"

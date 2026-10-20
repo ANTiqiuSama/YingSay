@@ -52,6 +52,9 @@ class App:
         from .usage import UsageMeter
 
         self.usage = UsageMeter(self.home / "usage.json")
+        from .local import LocalBackend
+
+        self.local = LocalBackend(cfg)
         self.ui = UI()
         self.root = self.ui.root
         self.recorder = Recorder(on_level=self._on_level)
@@ -133,13 +136,13 @@ class App:
         self.recorder.start(self.cfg.get("input_device"))
         log.info("开始录音 mode=%s app=%s", mode, exe)
         client = self.client()
-        if self.cfg.get("warmup"):
+        if self.cfg.get("warmup") and client.api_key:
             self.pool.submit(client.warmup)
         self.live = None
         if self.cfg.get("live_segmenting") and self.cfg.get("engine") != "omni":
             from .live import LiveTranscriber
 
-            proc = Processor(self.cfg, client, self.pool)
+            proc = Processor(self.cfg, client, self.pool, self.local)
             self.live = LiveTranscriber(self.recorder, proc.transcribe_segment, self.pool)
             self.live.start()
 
@@ -245,7 +248,7 @@ class App:
             winutil.focus_window(ctx.hwnd)
             ctx.selected_text = winutil.get_selected_text()
             log.info("指令模式，选中文字长度=%s", len(ctx.selected_text or ""))
-        proc = Processor(self.cfg, self.client(), self.pool)
+        proc = Processor(self.cfg, self.client(), self.pool, self.local)
         raw = None
         if live is not None:
             t_a = time.monotonic()
@@ -254,6 +257,7 @@ class App:
         res = proc.process(mode, pcm, ctx, raw=raw)
         if live is not None:
             res.timings["asr"] = asr_wait
+            res.timings["asr_src"] = getattr(getattr(live.transcribe_fn, "__self__", None), "asr_src", "")
             res.timings["segments"] = live.segments + 1
         res.timings["total"] = time.monotonic() - t_release
         res.timings["audio"] = len(pcm) / 16000
@@ -345,7 +349,11 @@ class App:
 
     def apply_settings(self, values: dict):
         old_auto = bool(self.cfg.get("autostart"))
+        old_local = (self.cfg.get("local_asr_model"), self.cfg.get("local_llm_model"))
         self.cfg.update(values)
+        if (self.cfg.get("local_asr_model"), self.cfg.get("local_llm_model")) != old_local and \
+                any(self.local.cached().values()):
+            self.pool.submit(lambda: self.notify_local(self.local.restart()))
         self._client = None  # 设置可能改了 Key / 节点，重建连接
         self.machine.set_bindings(self._bindings())
         self.machine.tap_to_toggle = bool(self.cfg.get("tap_to_toggle"))
@@ -360,8 +368,33 @@ class App:
     def test_connection(self, values: dict | None = None) -> str:
         return test_connection(self.client(values), values or {}, self.cfg)
 
+    def notify_local(self, msg: str):
+        log.info(msg)
+        self.overlay("message", "info", msg[:60], hide_after=4000)
+        self.tray.refresh()
+
+    def start_local(self):
+        self.pool.submit(lambda: self.notify_local(self.local.start()))
+
+    def stop_local(self):
+        self.pool.submit(lambda: self.notify_local(self.local.stop()))
+
+    def _local_autostart(self):
+        if self.cfg.get("asr_backend") == "mimo" and self.cfg.get("llm_backend") == "mimo":
+            return
+        if any(self.local.refresh(0).values()):
+            return
+        if self.local.check_installed() and self.cfg.get("local_autostart"):
+            self.notify_local(self.local.start())
+        self.tray.refresh()
+
     def quit(self):
         log.info("退出")
+        if self.cfg.get("local_stop_on_exit") and self.local.installed:
+            try:
+                self.local.stop()
+            except Exception:
+                pass
         self.hotkeys.stop()
         self.tray.stop()
         self.recorder.cancel()
@@ -378,7 +411,9 @@ class App:
                 pass
         if self.cfg.get("api_key") and self.cfg.get("warmup"):
             self.pool.submit(self.client().warmup, 0)
-        if not self.cfg.get("api_key"):
+        self.local.start_monitor()
+        self.pool.submit(self._local_autostart)
+        if not self.cfg.get("api_key") and not self.local.installed:
             self.ui.call(self.open_settings)
             self.ui.call(lambda: self.ui.overlay.message("info", "请先填写 MiMo API Key", hide_after=4000))
         else:
@@ -388,17 +423,74 @@ class App:
         self.ui.run()
 
 
+def benchmark(app) -> str:
+    """同一段录音分别跑：本地 Qwen3-ASR / SenseVoice / MiMo 云端识别，以及本地 / 云端润色。"""
+    import numpy as np
+
+    from . import prompts
+
+    pcm = app.last_pcm
+    note = "（用上一段录音）"
+    if pcm is None or len(pcm) < 1600:
+        pcm = (0.05 * np.sin(2 * np.pi * 440 * np.arange(32000) / 16000) * 32767).astype(np.int16)
+        note = "（还没有录音，用 2 秒测试音，只测速度）"
+    lines = [f"音频 {len(pcm) / 16000:.1f}s {note}"]
+    st = app.local.refresh(0)
+    lang = app.cfg.get("asr_language") or "auto"
+    texts = []
+
+    def run(label, fn):
+        t0 = time.monotonic()
+        try:
+            out = fn()
+            dt = time.monotonic() - t0
+            lines.append(f"{label}：{dt * 1000:.0f}ms  {out[:40]}")
+            return out
+        except Exception as e:  # noqa: BLE001
+            lines.append(f"{label}：失败 {str(e)[:60]}")
+            return None
+
+    if st.get("asr"):
+        run("本地 Qwen3-ASR（首次）", lambda: app.local.transcribe(pcm, "qwen", lang))
+        texts.append(run("本地 Qwen3-ASR", lambda: app.local.transcribe(pcm, "qwen", lang)))
+    else:
+        lines.append("本地 Qwen3-ASR：未运行")
+    if st.get("sv"):
+        texts.append(run("本地 SenseVoice", lambda: app.local.transcribe(pcm, "sensevoice", lang)))
+    else:
+        lines.append("本地 SenseVoice：未运行")
+    client = app.client()
+    if client.api_key:
+        from .audio import encode_audio
+
+        def cloud():
+            data, mime = encode_audio(pcm, app.cfg.get("upload_format") or "mp3")
+            return client.transcribe(data, app.cfg.get("asr_model"), lang, mime=mime, seconds=len(pcm) / 16000)
+
+        texts.append(run("MiMo 云端识别", cloud))
+    raw = next((t for t in texts if t), "") or "嗯那个我们明天下午三点开会，不对，是四点，记得带电脑"
+    msgs = prompts.dictate_messages(app.cfg, raw, "", "")
+    if st.get("llm"):
+        run("本地润色", lambda: app.local.chat(msgs, max_tokens=512))
+    else:
+        lines.append("本地润色：未运行")
+    if client.api_key:
+        run("MiMo 云端润色", lambda: client.chat(app.cfg.get("llm_model"), msgs, max_tokens=512))
+    return "\n".join(lines)
+
+
 def timing_label(t: dict) -> str:
     """✓ 1.6s（识别0.9 润色0.7）——一眼看出慢在哪一步。"""
     parts = []
+    loc = lambda k: "本地" if str(t.get(k, "")).startswith("本地") else ""  # noqa: E731
     if t.get("asr") is not None:
-        parts.append(f"识别{t['asr']:.1f}")
+        parts.append(f"{loc('asr_src')}识别{t['asr']:.1f}")
     if t.get("llm") is not None:
-        parts.append(f"润色{t['llm']:.1f}")
+        parts.append(f"{loc('llm_src')}润色{t['llm']:.1f}")
     if t.get("omni") is not None:
         parts.append(f"全模态{t['omni']:.1f}")
     s = f"{t.get('total', 0):.1f}s"
-    return s + (f"（{' '.join(parts)}）" if len(parts) > 1 else "")
+    return s + (f"（{' '.join(parts)}）" if parts else "")
 
 
 KEY_CLUSTER_NOTE = "提示：Token Plan 的 Key 只在开通套餐的那个节点有效，其它节点显示“Key不属于此节点”是正常的。"

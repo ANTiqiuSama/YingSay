@@ -80,6 +80,7 @@ ui.root.after(700, step(lambda: ui.overlay.message("busy", "识别中…"), "ove
 ui.root.after(900, step(app.open_settings, "settings"))
 ui.root.after(1100, step(app.open_history, "history"))
 ui.root.after(1300, step(lambda: app._show_answer("问题", "回答", Context()), "answer"))
+ui.root.after(1400, step(lambda: print(app.local.describe()), "local describe"))
 ui.root.after(1500, step(lambda: app.apply_settings({"hotkey_dictate": "ctrl_r"}), "apply settings"))
 ui.root.after(2500, step(app.quit, "quit"))
 threading.Timer(15, lambda: (annotate("timeout", "app did not quit in 15s"), os._exit(3))).start()

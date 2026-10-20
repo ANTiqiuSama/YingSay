@@ -587,3 +587,115 @@ def test_hedged_request_returns_fastest():
     t0 = _t.monotonic()
     assert c._post({"model": "m"}, hedge=0.2)["who"] == 2
     assert _t.monotonic() - t0 < 0.6
+
+
+# ---------------------------------------------------------------- 本地模型
+def test_parse_qwen_asr():
+    from yingsay.local import parse_qwen_asr
+
+    assert parse_qwen_asr("language Chinese<asr_text>你好，世界。") == "你好，世界。"
+    assert parse_qwen_asr("language None<asr_text>") == ""
+    assert parse_qwen_asr("language English") == ""
+    assert parse_qwen_asr("plain text") == "plain text"
+
+
+class FakeLocal:
+    def __init__(self, which="qwen", llm=True, fail=False):
+        self.which, self.llm, self.fail, self.calls = which, llm, fail, []
+
+    def asr_choice(self):
+        return self.which
+
+    def llm_ready(self):
+        return self.llm
+
+    def transcribe(self, pcm, which, lang, ctx):
+        self.calls.append(("asr", which))
+        if self.fail:
+            raise RuntimeError("down")
+        return "嗯那个明天三点开会不对是四点"
+
+    def chat(self, messages, max_tokens=0):
+        self.calls.append(("chat",))
+        return "<out>明天四点开会。</out>"
+
+
+def _pcm(sec=2.0):
+    return (np.sin(np.arange(int(16000 * sec)) / 9) * 3000).astype(np.int16)
+
+
+def test_pipeline_prefers_local(cfg):
+    from yingsay.pipeline import Context, Processor
+
+    fc, fl = FakeClient(), FakeLocal()
+    res = Processor(cfg, fc, local=fl).process("dictate", _pcm(), Context())
+    assert res.text == "明天四点开会。"
+    assert fl.calls == [("asr", "qwen"), ("chat",)]
+    assert fc.calls == []
+    assert res.timings["asr_src"].startswith("本地") and res.timings["llm_src"] == "本地"
+
+
+def test_pipeline_local_failure_falls_back_to_cloud(cfg):
+    from yingsay.pipeline import Context, Processor
+
+    fc, fl = FakeClient(), FakeLocal(fail=True, llm=False)
+    res = Processor(cfg, fc, local=fl).process("dictate", _pcm(), Context())
+    assert res.text == "明天四点开会。"
+    assert [c[0] for c in fc.calls] == ["asr", "chat"]
+
+
+def test_pipeline_backend_mimo_skips_local(cfg):
+    from yingsay.pipeline import Context, Processor
+
+    cfg.data["asr_backend"] = "mimo"
+    cfg.data["llm_backend"] = "mimo"
+    fc, fl = FakeClient(), FakeLocal()
+    Processor(cfg, fc, local=fl).process("dictate", _pcm(), Context())
+    assert fl.calls == []
+
+
+def test_timing_label_marks_local():
+    from yingsay.app import timing_label
+
+    s = timing_label({"total": 0.4, "asr": 0.1, "asr_src": "本地Qwen", "llm": 0.3, "llm_src": "本地"})
+    assert s == "0.4s（本地识别0.1 本地润色0.3）"
+
+
+def test_local_backend_against_fake_vllm(cfg):
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from yingsay.local import LocalBackend
+
+    seen = []
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            ok = self.server.server_port == srv_asr.server_port and self.path == "/v1/models"
+            self.send_response(200 if ok else 404)
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def do_POST(self):
+            body = _json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            seen.append(body)
+            out = _json.dumps({"choices": [{"message": {"content": "language Chinese<asr_text>测试。"}}]})
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(out.encode())
+
+    srv_asr = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv_asr.serve_forever, daemon=True).start()
+    cfg.data.update({"local_asr_port": srv_asr.server_port, "local_llm_port": 1, "local_sv_port": 1})
+    lb = LocalBackend(cfg)
+    lb.refresh(0)
+    assert lb.asr_choice() == "qwen"
+    assert lb.transcribe(_pcm(1), "qwen", "auto", ["米莫"]) == "测试。"
+    msg = seen[-1]["messages"]
+    assert msg[0]["role"] == "system" and "米莫" in msg[0]["content"]
+    assert msg[1]["content"][0]["audio_url"]["url"].startswith("data:audio/wav;base64,")
+    srv_asr.shutdown()
