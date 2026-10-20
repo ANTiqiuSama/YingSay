@@ -171,6 +171,7 @@ class App:
         self.recorder.cancel()
         self.session += 1
         if was:
+            self.sound("cancel")
             self.overlay("hide")
 
     def _ev_stop(self, mode: str):
@@ -266,6 +267,7 @@ class App:
         if res.note:
             self.overlay("message", "info", res.note, hide_after=3000)
         else:
+            self.sound("done")
             self.overlay("message", "ok", f"✓ {res.timings['total']:.1f}s  " + res.text.replace("\n", " "),
                          hide_after=1400)
 

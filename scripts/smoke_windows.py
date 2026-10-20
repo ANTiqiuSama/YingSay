@@ -14,6 +14,23 @@ from yingsay.pipeline import Context  # noqa: E402
 
 errors = []
 
+
+def annotate(name, exc_text):
+    """以 GitHub Actions 注释输出错误（公开可见，便于远程排查）。"""
+    msg = exc_text.strip().replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+    print(f"::error title=smoke {name}::{msg[-3000:]}", flush=True)
+
+
+def _hook(t, v, tb):
+    import traceback
+    annotate("uncaught", "".join(traceback.format_exception(t, v, tb)))
+    sys.__excepthook__(t, v, tb)
+    sys.stdout.flush()
+    os._exit(1)
+
+
+sys.excepthook = _hook
+
 # 剪贴板
 winutil.set_clipboard_text("原始剪贴板 ✓", transient=False)
 snap = winutil.snapshot_clipboard()
@@ -51,6 +68,7 @@ def step(fn, name):
             import traceback
 
             traceback.print_exc()
+            annotate(name, traceback.format_exc())
             errors.append(name)
     return run
 
@@ -64,7 +82,7 @@ ui.root.after(1100, step(app.open_history, "history"))
 ui.root.after(1300, step(lambda: app._show_answer("问题", "回答", Context()), "answer"))
 ui.root.after(1500, step(lambda: app.apply_settings({"hotkey_dictate": "ctrl_r"}), "apply settings"))
 ui.root.after(2500, step(app.quit, "quit"))
-threading.Timer(15, lambda: os._exit(3)).start()
+threading.Timer(15, lambda: (annotate("timeout", "app did not quit in 15s"), os._exit(3))).start()
 app.run()
 if errors:
     print("FAILED:", errors)

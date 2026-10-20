@@ -365,26 +365,80 @@ def set_autostart(enable: bool) -> None:
 
 
 # ------------------------------------------------------------------ 提示音
-def make_sounds(folder: Path) -> dict[str, str]:
+# 「应声」标志音：木琴/钢片琴质感的柔和音色（基频 + 少量泛音 + 指数衰减 + 轻混响），
+# 音高取自 G 大调五声音阶，纯五度/大三度等协和音程，避免纯正弦的刺耳感。
+SOUND_VERSION = "2"
+_SR = 44100
+_NOTE = {"G4": 392.00, "B4": 493.88, "D5": 587.33, "E5": 659.25, "G5": 783.99,
+         "A5": 880.00, "B5": 987.77, "D6": 1174.66, "E4": 329.63, "C5": 523.25}
+
+# 每个音：(音名, 起始秒, 力度, 衰减秒)
+SOUND_SPEC = {
+    "start": [("G5", 0.000, 0.85, 0.22), ("D6", 0.070, 1.00, 0.30)],               # 上行纯五度：「叮—咚↑」开始听
+    "stop": [("D6", 0.000, 0.70, 0.18), ("G5", 0.060, 0.80, 0.30)],                # 下行回落：收音
+    "done": [("G5", 0.000, 0.45, 0.20), ("B5", 0.045, 0.50, 0.22), ("D6", 0.090, 0.60, 0.35)],  # 大三和弦琶音：完成
+    "error": [("E5", 0.000, 0.70, 0.20), ("C5", 0.110, 0.75, 0.32)],               # 柔和下行大三度：出错
+    "cancel": [("B4", 0.000, 0.55, 0.12)],                                          # 单个闷音：取消
+}
+
+
+def _mallet(freq: float, dur: float, decay: float, np):
+    t = np.arange(int(_SR * dur)) / _SR
+    # 泛音：(倍频, 幅度, 衰减倍率) —— 4.0 与 2.76 给出类似木琴/钢片琴的明亮但不刺耳的音头
+    partials = [(1.0, 1.0, 1.0), (2.0, 0.28, 0.55), (2.76, 0.10, 0.30), (4.0, 0.05, 0.22)]
+    x = np.zeros_like(t)
+    for mult, amp, dk in partials:
+        f = freq * mult
+        if f > 9000:
+            continue
+        x += amp * np.sin(2 * np.pi * f * t) * np.exp(-t / (decay * dk))
+    attack = np.minimum(1.0, t / 0.004)          # 4ms 起音，去掉「咔」声
+    return x * attack
+
+
+def synth_sound(name: str):
+    """生成标志音 PCM（int16, 44.1kHz 单声道）。"""
     import numpy as np
 
+    notes = SOUND_SPEC[name]
+    total = max(st + dk * 3 for _, st, _, dk in notes) + 0.12
+    out = np.zeros(int(_SR * total))
+    for note, st, vel, dk in notes:
+        tone = _mallet(_NOTE[note], total - st, dk, np) * vel
+        i = int(_SR * st)
+        out[i:i + len(tone)] += tone[: len(out) - i]
+    # 轻量混响：几路衰减回声，让声音更「圆」
+    wet = np.zeros_like(out)
+    for delay, g in ((0.023, 0.22), (0.041, 0.16), (0.067, 0.10), (0.093, 0.06)):
+        d = int(_SR * delay)
+        wet[d:] += out[:-d] * g
+    out = out + wet
+    # 一阶低通，柔化高频
+    alpha = 0.55
+    y = np.empty_like(out)
+    acc = 0.0
+    for i in range(0, len(out)):
+        acc += alpha * (out[i] - acc)
+        y[i] = acc
+    fade = np.ones_like(y)
+    n = int(_SR * 0.03)
+    fade[-n:] = np.linspace(1, 0, n)
+    y *= fade
+    gain = {"done": 0.20, "cancel": 0.20, "stop": 0.24}.get(name, 0.30)
+    y = y / (np.abs(y).max() + 1e-9) * gain          # 峰值约 -10~-14 dBFS，柔和不吓人
+    return (y * 32767).astype(np.int16)
+
+
+def make_sounds(folder: Path) -> dict[str, str]:
     from .audio import to_wav_bytes
 
+    folder = folder / f"v{SOUND_VERSION}"
     folder.mkdir(parents=True, exist_ok=True)
-    spec = {"start": [(880, 0.06), (1320, 0.07)], "stop": [(1320, 0.05), (880, 0.07)],
-            "error": [(330, 0.12), (250, 0.16)], "cancel": [(600, 0.06)]}
     paths = {}
-    for name, tones in spec.items():
+    for name in SOUND_SPEC:
         p = folder / f"{name}.wav"
         if not p.exists():
-            sr = 16000
-            parts = []
-            for f, d in tones:
-                t = np.arange(int(sr * d)) / sr
-                env = np.minimum(1, np.minimum(t, d - t) / 0.01)
-                parts.append(0.22 * np.sin(2 * np.pi * f * t) * env)
-            pcm = (np.concatenate(parts) * 32767).astype(np.int16)
-            p.write_bytes(to_wav_bytes(pcm, sr))
+            p.write_bytes(to_wav_bytes(synth_sound(name), _SR))
         paths[name] = str(p)
     return paths
 
