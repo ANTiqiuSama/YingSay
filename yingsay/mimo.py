@@ -5,6 +5,8 @@ import base64
 import logging
 import re
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import TimeoutError as FutTimeout
 
 import requests
 import requests.adapters
@@ -37,7 +39,7 @@ def wav_data_url(audio: bytes, mime: str = "audio/wav") -> str:
 
 
 class MiMoClient:
-    def __init__(self, base_url: str, api_key: str, timeout: float = 60, retries: int = 2):
+    def __init__(self, base_url: str, api_key: str, timeout: float = 60, retries: int = 2, on_usage=None):
         self.base_url = (base_url or "").rstrip("/")
         self.api_key = (api_key or "").strip()
         self.timeout = timeout
@@ -47,6 +49,8 @@ class MiMoClient:
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
         self._last_io = 0.0
+        self.on_usage = on_usage  # 回调 (model, usage, audio_seconds)
+        self._hedge_pool: ThreadPoolExecutor | None = None
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.api_key}", "api-key": self.api_key}
@@ -76,7 +80,30 @@ class MiMoClient:
         return best, code
 
     # ------------------------------------------------------------ core
-    def _post(self, payload: dict) -> dict:
+    def _post(self, payload: dict, audio_seconds: float | None = None, hedge: float | None = None) -> dict:
+        """hedge>0 时启用“对冲请求”：首个请求超过 hedge 秒未返回就再发一份，谁先回来用谁。
+        跨境网络偶发的长尾卡顿（丢包重传、服务端排队）可以被明显削掉。"""
+        if not hedge or hedge <= 0:
+            return self._post_retry(payload, audio_seconds)
+        if self._hedge_pool is None:
+            self._hedge_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="hedge")
+        f1 = self._hedge_pool.submit(self._post_retry, payload, audio_seconds)
+        try:
+            return f1.result(timeout=hedge)
+        except FutTimeout:
+            pass
+        log.info("请求 %.1fs 未返回，发起对冲请求", hedge)
+        pending = {f1, self._hedge_pool.submit(self._post_retry, payload, audio_seconds)}
+        last: BaseException | None = None
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for f in done:
+                if f.exception() is None:
+                    return f.result()
+                last = f.exception()
+        raise last  # type: ignore[misc]
+
+    def _post_retry(self, payload: dict, audio_seconds: float | None = None) -> dict:
         if not self.api_key:
             raise MiMoError("未配置 API Key，请在设置中填写（Token Plan 的 tp- 开头密钥）")
         if not self.base_url:
@@ -97,9 +124,15 @@ class MiMoClient:
             else:
                 if r.status_code == 200:
                     try:
-                        return r.json()
+                        j = r.json()
                     except ValueError:
                         raise MiMoError(f"接口返回非 JSON: {r.text[:300]}")
+                    if self.on_usage:
+                        try:
+                            self.on_usage(payload.get("model", ""), j.get("usage"), audio_seconds)
+                        except Exception as e:  # pragma: no cover
+                            log.debug("用量统计失败: %s", e)
+                    return j
                 detail = r.text[:400]
                 try:
                     j = r.json()
@@ -117,7 +150,8 @@ class MiMoClient:
 
     # ------------------------------------------------------------ APIs
     def chat(self, model: str, messages: list, thinking: bool = False,
-             max_tokens: int = 2048, temperature: float | None = 0.2) -> str:
+             max_tokens: int = 2048, temperature: float | None = 0.2,
+             hedge: float | None = None, audio_seconds: float | None = None) -> str:
         payload = {
             "model": model,
             "messages": messages,
@@ -127,10 +161,10 @@ class MiMoClient:
         }
         if temperature is not None:
             payload["temperature"] = temperature
-        return _extract_text(self._post(payload))
+        return _extract_text(self._post(payload, audio_seconds, hedge))
 
     def transcribe(self, audio: bytes, model: str = "mimo-v2.5-asr", language: str = "auto",
-                   mime: str = "audio/wav") -> str:
+                   mime: str = "audio/wav", seconds: float | None = None, hedge: float | None = None) -> str:
         payload = {
             "model": model,
             "messages": [{
@@ -140,10 +174,11 @@ class MiMoClient:
             "asr_options": {"language": language or "auto"},
             "stream": False,
         }
-        return _extract_text(self._post(payload))
+        return _extract_text(self._post(payload, seconds, hedge))
 
     def audio_chat(self, model: str, audio: bytes, system: str, instruction: str,
-                   thinking: bool = False, max_tokens: int = 2048, mime: str = "audio/wav") -> str:
+                   thinking: bool = False, max_tokens: int = 2048, mime: str = "audio/wav",
+                   hedge: float | None = None) -> str:
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": [
@@ -151,4 +186,4 @@ class MiMoClient:
                 {"type": "text", "text": instruction},
             ]},
         ]
-        return self.chat(model, messages, thinking=thinking, max_tokens=max_tokens)
+        return self.chat(model, messages, thinking=thinking, max_tokens=max_tokens, hedge=hedge)

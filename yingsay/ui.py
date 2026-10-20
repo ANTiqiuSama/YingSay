@@ -210,7 +210,7 @@ class SettingsWindow:
         cfg = app.cfg
         self.w = w = tk.Toplevel(app.root)
         w.title(f"{DISPLAY_NAME} {__version__} 设置")
-        w.geometry("680x740")
+        w.geometry("700x820")
         nb = ttk.Notebook(w)
         nb.pack(fill="both", expand=True, padx=8, pady=8)
         self.vars: dict[str, tk.Variable] = {}
@@ -258,6 +258,13 @@ class SettingsWindow:
         ttk.Button(bar, text="自动选最快节点", command=self.pick_cluster).pack(side="left", padx=8)
         self.status = ttk.Label(f, text="", wraplength=560, justify="left")
         self.status.grid(row=13, column=0, columnspan=2, sticky="w")
+        ttk.Separator(f).grid(row=14, column=0, columnspan=2, sticky="ew", pady=8)
+        ttk.Label(f, text="用量（本机估算）").grid(row=15, column=0, sticky="nw")
+        self.usage_label = ttk.Label(f, text="", wraplength=500, justify="left")
+        self.usage_label.grid(row=15, column=1, sticky="w")
+        ttk.Label(f, text="按官方规则折算：ASR 30M Credits/小时，flash 输入100/输出200 每 token，闲时0.8倍；以 MiMo 控制台为准",
+                  foreground="#888", wraplength=500).grid(row=16, column=1, sticky="w")
+        self._refresh_usage()
 
         # --- 热键
         f = tab("热键")
@@ -317,8 +324,10 @@ class SettingsWindow:
         row(f, 15, "上传格式", "upload_format", "combo", ["mp3", "wav"], hint="mp3 体积约 1/8，网络慢时明显更快")
         row(f, 17, "短句跳过润色(字数)", "polish_skip_chars", hint="不超过该字数且无口头禅时直接输入识别结果；0=总是润色")
         row(f, 19, "按键时预热连接", "warmup", "check")
+        row(f, 20, "对冲慢请求", "hedge_requests", "check", hint="请求迟迟不返回时再发一份，谁快用谁（偶尔多耗一点用量）")
+        row(f, 22, "套餐", "plan", "combo", ["Lite", "Standard", "Pro", "Max"], hint="用于显示月额度占比")
         ttk.Button(f, text="打开配置/日志目录", command=lambda: os.startfile(str(app.home))
-                   if hasattr(os, "startfile") else None).grid(row=20, column=0, sticky="w", pady=12)
+                   if hasattr(os, "startfile") else None).grid(row=24, column=0, sticky="w", pady=12)
 
         bottom = ttk.Frame(w)
         bottom.pack(fill="x", padx=8, pady=(0, 10))
@@ -360,6 +369,16 @@ class SettingsWindow:
         out["app_styles"] = styles
         return out
 
+    def _refresh_usage(self):
+        try:
+            if not self.w.winfo_exists():
+                return
+            plan = self.vars.get("plan").get() if self.vars.get("plan") else self.app.cfg.get("plan")
+            self.usage_label.config(text=self.app.usage.summary(plan or "Max"))
+            self.w.after(3000, self._refresh_usage)
+        except Exception:
+            pass
+
     def save(self):
         values = self.collect()
         self.app.apply_settings(values)
@@ -374,15 +393,19 @@ class SettingsWindow:
 
             res = probe_clusters(key)
             best = best_cluster(res)
-            detail = "  ".join(f"{n}:{'不可达' if l is None else ('Key无效' if c in (401, 403) else f'{l * 1000:.0f}ms')}"
+            from .app import KEY_CLUSTER_NOTE
+
+            detail = "  ".join(f"{n}:{'不可达' if l is None else ('Key不属于此节点' if c in (401, 403) else f'{l * 1000:.0f}ms')}"
                                for n, u, l, c in res)
+            if any(c in (401, 403) for *_, c in res):
+                detail += "\n" + KEY_CLUSTER_NOTE
 
             def done():
                 if best:
                     self.vars["base_url"].set(best[1])
                     self.status.config(text=f"已选择「{best[0]}」节点（{best[2] * 1000:.0f}ms），记得点保存。\n{detail}")
                 else:
-                    self.status.config(text=f"没有可用节点，请检查 API Key。\n{detail}")
+                    self.status.config(text=f"没有可用节点，请检查 API Key 是否正确。\n{detail}")
 
             self.app.ui.call(done)
 
@@ -454,6 +477,15 @@ def make_icon_image(color=(255, 77, 94)):
 
 
 class Tray:
+    def refresh(self):
+        """刷新托盘菜单里的动态文字（今日用量）。"""
+        try:
+            icon = getattr(self, "icon", None)
+            if icon is not None:
+                icon.update_menu()
+        except Exception:
+            pass
+
     def __init__(self, app):
         import pystray
 
@@ -470,6 +502,7 @@ class Tray:
         menu = pystray.Menu(
             pystray.MenuItem(f"{DISPLAY_NAME} {__version__}", None, enabled=False),
             pystray.MenuItem(lambda item: f"听写：按住 {cfg.get('hotkey_dictate')}", None, enabled=False),
+            pystray.MenuItem(lambda item: f"今日用量：{app.usage.short()}", lambda: app.ui.call(app.open_settings)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("设置…", lambda: app.ui.call(app.open_settings), default=True),
             pystray.MenuItem("历史记录…", lambda: app.ui.call(app.open_history)),

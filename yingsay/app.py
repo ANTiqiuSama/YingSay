@@ -49,6 +49,9 @@ class App:
         self.rec_dir.mkdir(exist_ok=True)
         self.history_path = self.home / "history.jsonl"
         self.sounds = winutil.make_sounds(self.home / "sounds")
+        from .usage import UsageMeter
+
+        self.usage = UsageMeter(self.home / "usage.json")
         self.ui = UI()
         self.root = self.ui.root
         self.recorder = Recorder(on_level=self._on_level)
@@ -89,12 +92,14 @@ class App:
         if not overrides:
             if self._client is None:
                 self._client = MiMoClient(self.cfg.get("base_url"), self.cfg.get("api_key"),
-                                          timeout=float(self.cfg.get("request_timeout") or 60))
+                                          timeout=float(self.cfg.get("request_timeout") or 60),
+                                          on_usage=self.usage.record)
             return self._client
         o = overrides
         return MiMoClient(o.get("base_url") or self.cfg.get("base_url"),
                           o.get("api_key") if o.get("api_key") is not None else self.cfg.get("api_key"),
-                          timeout=float(o.get("request_timeout") or self.cfg.get("request_timeout") or 60))
+                          timeout=float(o.get("request_timeout") or self.cfg.get("request_timeout") or 60),
+                          on_usage=self.usage.record)
 
     def _on_level(self, v: float):
         self.ui.overlay.level = max(self.ui.overlay.level, v)
@@ -213,6 +218,8 @@ class App:
                 log.exception("处理失败")
                 self.sound("error")
                 self.overlay("message", "error", f"出错：{e}"[:60], hide_after=5000)
+            finally:
+                self.tray.refresh()
 
     def _save_recording(self, pcm):
         from .audio import to_wav_bytes
@@ -268,7 +275,7 @@ class App:
             self.overlay("message", "info", res.note, hide_after=3000)
         else:
             self.sound("done")
-            self.overlay("message", "ok", f"✓ {res.timings['total']:.1f}s  " + res.text.replace("\n", " "),
+            self.overlay("message", "ok", f"✓ {timing_label(res.timings)}  " + res.text.replace("\n", " "),
                          hide_after=1400)
 
     def _show_answer(self, q, a, ctx):
@@ -381,6 +388,22 @@ class App:
         self.ui.run()
 
 
+def timing_label(t: dict) -> str:
+    """✓ 1.6s（识别0.9 润色0.7）——一眼看出慢在哪一步。"""
+    parts = []
+    if t.get("asr") is not None:
+        parts.append(f"识别{t['asr']:.1f}")
+    if t.get("llm") is not None:
+        parts.append(f"润色{t['llm']:.1f}")
+    if t.get("omni") is not None:
+        parts.append(f"全模态{t['omni']:.1f}")
+    s = f"{t.get('total', 0):.1f}s"
+    return s + (f"（{' '.join(parts)}）" if len(parts) > 1 else "")
+
+
+KEY_CLUSTER_NOTE = "提示：Token Plan 的 Key 只在开通套餐的那个节点有效，其它节点显示“Key不属于此节点”是正常的。"
+
+
 def probe_clusters(api_key: str) -> list[tuple[str, str, float | None, int | None]]:
     """并发测量三个 Token Plan 节点的时延与鉴权状态。"""
     def one(item):
@@ -426,10 +449,12 @@ def test_connection(client: MiMoClient, values: dict, cfg: Config) -> str:
                 if lat is None:
                     parts.append(f"{name}:不可达")
                 elif code in (401, 403):
-                    parts.append(f"{name}:Key无效")
+                    parts.append(f"{name}:Key不属于此节点")
                 else:
                     parts.append(f"{name}:{lat * 1000:.0f}ms")
             msg += "\n节点：" + "  ".join(parts)
+            if any(code in (401, 403) for _, _, _, code in res):
+                msg += "\n" + KEY_CLUSTER_NOTE
             best = best_cluster(res)
             if best and best[1] != client.base_url:
                 msg += f"\n建议切换到更快的「{best[0]}」节点"

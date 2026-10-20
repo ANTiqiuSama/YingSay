@@ -32,7 +32,7 @@ def smart_join(parts: list[str]) -> str:
 
 class LiveTranscriber:
     def __init__(self, recorder, transcribe_fn, executor: ThreadPoolExecutor,
-                 min_seg: float = 4.0, max_seg: float = 20.0, pause: float = 0.45, interval: float = 0.15):
+                 min_seg: float = 2.5, max_seg: float = 15.0, pause: float = 0.35, interval: float = 0.15):
         self.rec = recorder
         self.transcribe_fn = transcribe_fn
         self.ex = executor

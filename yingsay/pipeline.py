@@ -49,15 +49,22 @@ class Processor:
         lang = self.cfg.get("asr_language")
         fmt = "wav" if Processor._wav_only else (self.cfg.get("upload_format") or "mp3")
         data, mime = encode_audio(pcm, fmt)
+        sec = len(pcm) / 16000
+        hedge = self.hedge_delay(1.6 + sec * 0.04)
         try:
-            return self.client.transcribe(data, model, lang, mime=mime).strip()
+            return self.client.transcribe(data, model, lang, mime=mime, seconds=sec, hedge=hedge).strip()
         except MiMoError as e:
             if mime == "audio/wav" or "鉴权" in str(e):
                 raise
             log.warning("MP3 上传失败（%s），改用 WAV 重试", e)
             Processor._wav_only = True
             data, mime = encode_audio(pcm, "wav")
-            return self.client.transcribe(data, model, lang, mime=mime).strip()
+            return self.client.transcribe(data, model, lang, mime=mime, seconds=sec, hedge=hedge).strip()
+
+    def hedge_delay(self, base: float) -> float | None:
+        if not self.cfg.get("hedge_requests"):
+            return None
+        return max(0.8, base * float(self.cfg.get("hedge_scale") or 1.0))
 
     def transcribe(self, pcm: np.ndarray) -> str:
         chunks = split_for_upload(pcm)
@@ -66,11 +73,12 @@ class Processor:
         ex = self.ex or ThreadPoolExecutor(max_workers=4)
         return smart_join(list(ex.map(self.transcribe_segment, chunks)))
 
-    def _llm(self, model_key: str, messages: list, raw_len: int) -> str:
+    def _llm(self, model_key: str, messages: list, raw_len: int, hedge: bool = False) -> str:
         return self.client.chat(
             self.cfg.get(model_key), messages,
             thinking=bool(self.cfg.get("llm_thinking")),
             max_tokens=max(512, raw_len * 3),
+            hedge=self.hedge_delay(2.2 + raw_len * 0.012) if hedge else None,
         )
 
     # -------------------------------------------------------- main
@@ -115,7 +123,7 @@ class Processor:
         t1 = time.monotonic()
         try:
             out = self._llm("llm_model", prompts.dictate_messages(self.cfg, raw, ctx.exe, ctx.title,
-                                                                  translate=(mode == "translate")), len(raw))
+                                                                  translate=(mode == "translate")), len(raw), hedge=True)
             kind, text = prompts.extract_out(out)
         except Exception as e:  # 润色失败绝不丢字：退回原始识别
             log.warning("润色失败，使用原始识别结果: %s", e)

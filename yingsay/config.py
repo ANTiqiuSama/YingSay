@@ -44,6 +44,9 @@ DEFAULTS: dict = {
     "live_segmenting": True,  # 边说边识别：在停顿处切段并提前上传
     "polish_skip_chars": 6,  # 不超过这么多字且没有口头禅时跳过 AI 润色
     "warmup": True,  # 按下热键时预热 HTTPS 连接
+    "hedge_requests": True,  # 对冲请求：慢请求超时前再发一份，谁先回来用谁（少量额外用量换稳定速度）
+    "hedge_scale": 1.0,  # 对冲等待时间倍数，网络稳定可调大
+    "plan": "Max",  # Token Plan 套餐（用于显示月额度占比）：Lite / Standard / Pro / Max
     # ---- 热键 ----
     "hotkey_dictate": "ctrl_r",
     "hotkey_command": "f8",

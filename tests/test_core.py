@@ -105,11 +105,11 @@ class FakeClient:
     def __init__(self, asr="嗯那个明天三点开会不对是四点", llm="<out>明天四点开会。</out>"):
         self.asr, self.llm, self.calls = asr, llm, []
 
-    def transcribe(self, wav, model, lang, mime="audio/wav"):
+    def transcribe(self, wav, model, lang, mime="audio/wav", **kw):
         self.calls.append(("asr", model, lang, mime))
         return self.asr
 
-    def chat(self, model, messages, thinking=False, max_tokens=0, temperature=None):
+    def chat(self, model, messages, thinking=False, max_tokens=0, temperature=None, **kw):
         self.calls.append(("chat", model, messages))
         if isinstance(self.llm, Exception):
             raise self.llm
@@ -321,11 +321,11 @@ class FakeClient:
     def __init__(self, asr="嗯那个明天三点开会不对是四点", llm="<out>明天四点开会。</out>"):
         self.asr, self.llm, self.calls = asr, llm, []
 
-    def transcribe(self, wav, model, lang, mime="audio/wav"):
+    def transcribe(self, wav, model, lang, mime="audio/wav", **kw):
         self.calls.append(("asr", model, lang, mime))
         return self.asr
 
-    def chat(self, model, messages, thinking=False, max_tokens=0, temperature=None):
+    def chat(self, model, messages, thinking=False, max_tokens=0, temperature=None, **kw):
         self.calls.append(("chat", model, messages))
         if isinstance(self.llm, Exception):
             raise self.llm
@@ -449,7 +449,7 @@ def test_raw_from_live_skips_asr(cfg):
 
 def test_mp3_fallback_to_wav(cfg):
     class C(FakeClient):
-        def transcribe(self, wav, model, lang, mime="audio/wav"):
+        def transcribe(self, wav, model, lang, mime="audio/wav", **kw):
             self.calls.append(("asr", mime))
             if mime == "audio/mpeg":
                 raise MiMoError("HTTP 400: unsupported")
@@ -532,3 +532,58 @@ def test_live_skips_silent_tail():
 def test_smart_join():
     from yingsay.live import smart_join
     assert smart_join(["Hello world.", "This is", "测试", "OK"]) == "Hello world. This is测试OK"
+
+
+# ---------------------------------------------------------------- 用量 / 对冲
+def test_fmt_num_units():
+    from yingsay.usage import fmt_num
+
+    assert fmt_num(999) == "999"
+    assert fmt_num(1234) == "1.23K"
+    assert fmt_num(5_600_000) == "5.6M"
+    assert fmt_num(82e9) == "82B"
+
+
+def test_usage_credits(tmp_path):
+    import datetime as dt
+
+    from yingsay.usage import UsageMeter, estimate_credits
+
+    noon = dt.datetime(2026, 1, 1, 12, tzinfo=dt.timezone(dt.timedelta(hours=8)))
+    night = dt.datetime(2026, 1, 1, 3, tzinfo=dt.timezone(dt.timedelta(hours=8)))
+    c, _ = estimate_credits("mimo-v2.5-asr", {"prompt_tokens": 999}, 3600, noon)
+    assert c == 30_000_000
+    c, _ = estimate_credits("mimo-v2.6-flash", {"prompt_tokens": 100, "completion_tokens": 10,
+                                                "prompt_tokens_details": {"cached_tokens": 40}}, None, noon)
+    assert c == 60 * 100 + 40 * 2 + 10 * 200
+    c2, _ = estimate_credits("mimo-v2.6-pro", {"prompt_tokens": 10}, None, night)
+    assert abs(c2 - 10 * 300 * 0.8) < 1e-6
+    m = UsageMeter(tmp_path / "usage.json")
+    m.record("mimo-v2.5-asr", None, 2.4)
+    m.record("mimo-v2.6-flash", {"prompt_tokens": 50, "completion_tokens": 20}, None)
+    t = UsageMeter(tmp_path / "usage.json").today()
+    assert t["requests"] == 2 and t["asr_seconds"] == 2
+    assert "Credits" in m.summary("Max")
+
+
+def test_hedged_request_returns_fastest():
+    import threading
+    import time as _t
+
+    from yingsay.mimo import MiMoClient
+
+    c = MiMoClient("https://x", "tp-k")
+    n = {"i": 0}
+    lock = threading.Lock()
+
+    def fake(payload, secs=None):
+        with lock:
+            n["i"] += 1
+            i = n["i"]
+        _t.sleep(1.0 if i == 1 else 0.05)
+        return {"who": i}
+
+    c._post_retry = fake
+    t0 = _t.monotonic()
+    assert c._post({"model": "m"}, hedge=0.2)["who"] == 2
+    assert _t.monotonic() - t0 < 0.6
